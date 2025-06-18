@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Streaming</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        video {
+            width: 100%;
+            max-width: 640px;
+            height: auto;
+            border: 2px solid #ddd;
+            border-radius: 4px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .streamers-list {
+            margin: 20px 0;
+        }
+        .streamer-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 5px 0;
+        }
+        #app {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .section {
+            flex: 1;
+            min-width: 300px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Video Streaming Platform</h1>
+    <div id="app">
+        <div class="section">
+            <div class="container">
+                <h2>Streamer</h2>
+                <div id="streamer-status" class="status disconnected">Disconnected</div>
+                <video id="localVideo" autoplay muted></video>
+                <div>
+                    <button id="startStream">Start Streaming</button>
+                    <button id="stopStream" disabled>Stop Streaming</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <div class="container">
+                <h2>Viewer</h2>
+                <div id="viewer-status" class="status disconnected">Disconnected</div>
+                <div class="streamers-list">
+                    <h3>Available Streams:</h3>
+                    <div id="streamersList"></div>
+                </div>
+                <video id="remoteVideo" autoplay></video>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class VideoStreaming {
+            constructor() {
+                this.streamerWs = null;
+                this.viewerWs = null;
+                this.localStream = null;
+                this.streamerPeerConnection = null;
+                this.viewerPeerConnection = null;
+                this.remoteStream = null;
+                this.isStreaming = false;
+                this.isConnecting = false;
+                this.streamerId = 'streamer_' + Math.random().toString(36).substr(2, 9);
+                this.viewerId = 'viewer_' + Math.random().toString(36).substr(2, 9);
+                
+                this.setupEventListeners();
+                this.connectViewer();
+            }
+
+            setupEventListeners() {
+                document.getElementById('startStream').addEventListener('click', () => this.startStreaming());
+                document.getElementById('stopStream').addEventListener('click', () => this.stopStreaming());
+            }
+
+            async startStreaming() {
+                try {
+                    this.localStream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: true
+                    });
+                    
+                    document.getElementById('localVideo').srcObject = this.localStream;
+                    
+                    this.connectStreamer();
+                    this.isStreaming = true;
+                    
+                    document.getElementById('startStream').disabled = true;
+                    document.getElementById('stopStream').disabled = false;
+                    document.getElementById('streamer-status').textContent = 'Streaming...';
+                    document.getElementById('streamer-status').className = 'status connected';
+                } catch (error) {
+                    console.error('Error starting stream:', error);
+                    alert('Could not access camera/microphone');
+                }
+            }
+
+            stopStreaming() {
+                if (this.localStream) {
+                    this.localStream.getTracks().forEach(track => track.stop());
+                    this.localStream = null;
+                }
+                
+                if (this.streamerWs) {
+                    this.streamerWs.close();
+                    this.streamerWs = null;
+                }
+                
+                if (this.streamerPeerConnection) {
+                    this.streamerPeerConnection.close();
+                    this.streamerPeerConnection = null;
+                }
+                
+                if (this.viewerPeerConnection) {
+                    this.viewerPeerConnection.close();
+                    this.viewerPeerConnection = null;
+                }
+                
+                document.getElementById('localVideo').srcObject = null;
+                document.getElementById('startStream').disabled = false;
+                document.getElementById('stopStream').disabled = true;
+                document.getElementById('streamer-status').textContent = 'Stopped';
+                document.getElementById('streamer-status').className = 'status disconnected';
+                
+                this.isStreaming = false;
+            }
+
+            connectStreamer() {
+                this.streamerWs = new WebSocket(`ws://localhost:8080/ws?id=${this.streamerId}&type=streamer`);
+                
+                this.streamerWs.onopen = () => {
+                    console.log('Streamer connected');
+                };
+
+                this.streamerWs.onmessage = async (event) => {
+                    const message = JSON.parse(event.data);
+                    await this.handleStreamerMessage(message);
+                };
+
+                this.streamerWs.onclose = () => {
+                    console.log('Streamer disconnected');
+                };
+            }
+
+            connectViewer() {
+                this.viewerWs = new WebSocket(`ws://localhost:8080/ws?id=${this.viewerId}&type=viewer`);
+                
+                this.viewerWs.onopen = () => {
+                    console.log('Viewer connected');
+                    document.getElementById('viewer-status').textContent = 'Connected';
+                    document.getElementById('viewer-status').className = 'status connected';
+                };
+
+                this.viewerWs.onmessage = async (event) => {
+                    const message = JSON.parse(event.data);
+                    await this.handleViewerMessage(message);
+                };
+
+                this.viewerWs.onclose = () => {
+                    console.log('Viewer disconnected');
+                    document.getElementById('viewer-status').textContent = 'Disconnected';
+                    document.getElementById('viewer-status').className = 'status disconnected';
+                };
+            }
+
+            async handleStreamerMessage(message) {
+                switch (message.type) {
+                    case 'offer':
+                        await this.handleOffer(message);
+                        break;
+                    case 'ice-candidate':
+                        await this.handleIceCandidate(message);
+                        break;
+                }
+            }
+
+            async handleViewerMessage(message) {
+                switch (message.type) {
+                    case 'streamers-list':
+                        this.updateStreamersList(message.data);
+                        break;
+                    case 'answer':
+                        await this.handleAnswer(message);
+                        break;
+                    case 'ice-candidate':
+                        await this.handleIceCandidate(message);
+                        break;
+                }
+            }
+
+            updateStreamersList(streamers) {
+                const list = document.getElementById('streamersList');
+                list.innerHTML = '';
+                
+                streamers.forEach(streamerId => {
+                    const item = document.createElement('div');
+                    item.className = 'streamer-item';
+                    item.innerHTML = `
+                        <span>Stream: ${streamerId}</span>
+                        <button onclick="videoStreaming.watchStream('${streamerId}')">Watch</button>
+                    `;
+                    list.appendChild(item);
+                });
+            }
+
+            async watchStream(streamerId) {
+                if (this.isConnecting) {
+                    console.log('Already connecting, ignoring request');
+                    return;
+                }
+                
+                console.log('Attempting to watch stream:', streamerId);
+                this.isConnecting = true;
+                
+                try {
+                    if (this.viewerPeerConnection) {
+                        this.viewerPeerConnection.close();
+                    }
+
+                    this.viewerPeerConnection = new RTCPeerConnection({
+                        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                    });
+
+                    this.viewerPeerConnection.ontrack = (event) => {
+                        console.log('Received remote stream');
+                        document.getElementById('remoteVideo').srcObject = event.streams[0];
+                        this.isConnecting = false;
+                    };
+
+                    this.viewerPeerConnection.onicecandidate = (event) => {
+                        if (event.candidate && this.viewerWs) {
+                            console.log('Sending ICE candidate to streamer');
+                            this.viewerWs.send(JSON.stringify({
+                                type: 'ice-candidate',
+                                data: event.candidate,
+                                to: streamerId
+                            }));
+                        }
+                    };
+
+                    this.viewerPeerConnection.onconnectionstatechange = () => {
+                        console.log('Viewer connection state:', this.viewerPeerConnection.connectionState);
+                        if (this.viewerPeerConnection.connectionState === 'failed' || 
+                            this.viewerPeerConnection.connectionState === 'disconnected') {
+                            this.isConnecting = false;
+                        }
+                    };
+
+                    // Add transceiver for receiving video
+                    this.viewerPeerConnection.addTransceiver('video', {direction: 'recvonly'});
+                    this.viewerPeerConnection.addTransceiver('audio', {direction: 'recvonly'});
+
+                    const offer = await this.viewerPeerConnection.createOffer();
+                    await this.viewerPeerConnection.setLocalDescription(offer);
+
+                    console.log('Sending offer to streamer');
+                    this.viewerWs.send(JSON.stringify({
+                        type: 'offer',
+                        data: offer,
+                        to: streamerId
+                    }));
+                } catch (error) {
+                    console.error('Error in watchStream:', error);
+                    this.isConnecting = false;
+                }
+            }
+
+            async handleOffer(message) {
+                console.log('Received offer from viewer:', message.from);
+                if (!this.isStreaming) {
+                    console.log('Not streaming, ignoring offer');
+                    return;
+                }
+
+                this.streamerPeerConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+
+                this.streamerPeerConnection.onicecandidate = (event) => {
+                    if (event.candidate && this.streamerWs) {
+                        console.log('Sending ICE candidate to viewer');
+                        this.streamerWs.send(JSON.stringify({
+                            type: 'ice-candidate',
+                            data: event.candidate,
+                            to: message.from
+                        }));
+                    }
+                };
+
+                this.streamerPeerConnection.onconnectionstatechange = () => {
+                    console.log('Streamer connection state:', this.streamerPeerConnection.connectionState);
+                };
+
+                this.localStream.getTracks().forEach(track => {
+                    this.streamerPeerConnection.addTrack(track, this.localStream);
+                });
+
+                await this.streamerPeerConnection.setRemoteDescription(message.data);
+                const answer = await this.streamerPeerConnection.createAnswer();
+                await this.streamerPeerConnection.setLocalDescription(answer);
+
+                console.log('Sending answer to viewer');
+                this.streamerWs.send(JSON.stringify({
+                    type: 'answer',
+                    data: answer,
+                    to: message.from
+                }));
+            }
+
+            async handleAnswer(message) {
+                console.log('Received answer from streamer');
+                if (this.viewerPeerConnection) {
+                    await this.viewerPeerConnection.setRemoteDescription(message.data);
+                }
+            }
+
+            async handleIceCandidate(message) {
+                console.log('Received ICE candidate');
+                const pc = this.isStreaming ? this.streamerPeerConnection : this.viewerPeerConnection;
+                if (pc) {
+                    await pc.addIceCandidate(message.data);
+                }
+            }
+        }
+
+        const videoStreaming = new VideoStreaming();
+    </script>
+</body>
+</html>
