@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"github.com/gorilla/websocket"
 	"github.com/rs/cors"
@@ -19,6 +20,12 @@ type Message struct {
 	Data interface{} `json:"data"`
 	From string      `json:"from,omitempty"`
 	To   string      `json:"to,omitempty"`
+}
+
+type ReactionData struct {
+	Emoji string `json:"emoji"`
+	X     int    `json:"x"`
+	Y     int    `json:"y"`
 }
 
 type Client struct {
@@ -122,15 +129,20 @@ func (h *Hub) run() {
 					log.Printf("Target client %s not found", message.To)
 				}
 			} else {
-				// Broadcast to all clients (this shouldn't happen with cohort system)
-				log.Printf("Broadcasting to all clients (unexpected)")
-				for id, client := range h.clients {
-					select {
-					case client.Send <- message:
-					default:
-						log.Printf("Failed to broadcast to %s, removing client", id)
-						close(client.Send)
-						delete(h.clients, id)
+				// Broadcast to all clients in the same cohort (for reactions)
+				senderClient := h.clients[message.From]
+				if senderClient != nil {
+					for id, client := range h.clients {
+						if client.Cohort == senderClient.Cohort {
+							select {
+							case client.Send <- message:
+								log.Printf("Broadcasted %s to %s", message.Type, id)
+							default:
+								log.Printf("Failed to broadcast %s to %s, removing client", message.Type, id)
+								close(client.Send)
+								delete(h.clients, id)
+							}
+						}
 					}
 				}
 			}
@@ -326,6 +338,12 @@ func main() {
 
 	handler := c.Handler(mux)
 
-	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", handler))
+	// Use Railway's PORT environment variable
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Server starting on :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }
